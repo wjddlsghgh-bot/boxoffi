@@ -1,165 +1,185 @@
-import datetime
-import requests
-import pandas as pd
-import pytz
-import streamlit as st
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>일별 박스오피스 조회</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 30px;
+      background-color: #f8f9fa;
+    }
+    h1 {
+      color: #333;
+    }
+    .controls {
+      margin-bottom: 20px;
+    }
+    label {
+      font-weight: bold;
+      margin-right: 10px;
+    }
+    input[type="date"] {
+      padding: 6px 10px;
+      font-size: 14px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background-color: #fff;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    th, td {
+      border: 1px solid #dee2e6;
+      padding: 12px;
+      text-align: center;
+    }
+    th {
+      background-color: #343a40;
+      color: #fff;
+    }
+    tr:nth-child(even) {
+      background-color: #f2f2f2;
+    }
+    .rank-up {
+      color: #e74c3c;
+      font-weight: bold;
+    }
+    .rank-down {
+      color: #2980b9;
+      font-weight: bold;
+    }
+    .rank-same {
+      color: #7f8c8d;
+    }
+    .movie-title {
+      text-align: left;
+    }
+    #message {
+      margin-top: 20px;
+      font-size: 16px;
+      color: #e74c3c;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
 
-# Streamlit 페이지 기본 설정
-st.set_page_config(
-    page_title="어제의 박스오피스", page_icon="🎬", layout="wide"
-)
+  <h1>🎬 일별 박스오피스</h1>
 
-st.title("🎬 어제 일별 박스오피스 순위")
+  <div class="controls">
+    <label for="targetDate">날짜 선택:</label>
+    <input type="date" id="targetDate">
+  </div>
 
+  <table id="boxOfficeTable">
+    <thead>
+      <tr>
+        <th>순위</th>
+        <th>변동</th>
+        <th>영화명</th>
+        <th>개봉일</th>
+        <th>당일 관객수</th>
+        <th>누적 관객수</th>
+      </tr>
+    </thead>
+    <tbody id="boxOfficeList">
+      <!-- 데이터가 여기에 동적으로 추가됩니다 -->
+    </tbody>
+  </table>
 
-# 1. 한국 시간(KST) 기준 '어제' 날짜 계산 함수
-def get_yesterday_kst():
-    # 배포 서버의 시계와 무관하게 한국 시간(Asia/Seoul)을 가져옵니다.
-    kst_tz = pytz.timezone("Asia/Seoul")
-    now_kst = datetime.datetime.now(kst_tz)
-    yesterday_kst = now_kst - datetime.timedelta(days=1)
-    return yesterday_kst.strftime("%Y%m%d")
+  <div id="message"></div>
 
+  <script>
+    // 본인의 Kobis API 키를 입력하세요.
+    const API_KEY = 'YOUR_API_KEY';
 
-# 2. API 키 안전하게 가져오기 (Secrets 예외 완벽 방지)
-def get_api_key():
-    api_key = None
+    // 어제 날짜 계산 (YYYY-MM-DD 형식)
+    function getYesterdayString() {
+      const today = new Date();
+      today.setDate(today.getDate() - 1);
+      const year = today.getFullYear();
+      const month = String(today.getMonth() + 1).padStart(2, '0');
+      const day = String(today.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
 
-    # Streamlit Secrets 읽기 시도 (오류 발생 시 무시)
-    try:
-        if hasattr(st, "secrets") and "KOBIS_KEY" in st.secrets:
-            api_key = st.secrets["KOBIS_KEY"]
-    except Exception:
-        api_key = None
+    // 날짜 선택 input 기본값 및 max값 설정
+    const dateInput = document.getElementById('targetDate');
+    const yesterday = getYesterdayString();
+    
+    dateInput.max = yesterday; // 오늘 및 미래 날짜 선택 불가
+    dateInput.value = yesterday; // 기본 선택값: 어제
 
-    # 사이드바 입력창 제공 (Secrets에 키가 없는 경우)
-    st.sidebar.subheader("🔑 KOBIS API 키 설정")
-    user_key = st.sidebar.text_input(
-        "KOBIS API 키를 입력하세요:",
-        value=api_key if api_key else "",
-        type="password",
-        help="발급받은 KOBIS API 키를 입력하면 바로 조회됩니다.",
-    )
+    // 박스오피스 데이터 불러오기 함수
+    async function fetchBoxOffice(selectedDate) {
+      // YYYY-MM-DD -> YYYYMMDD 변환
+      const targetDt = selectedDate.replace(/-/g, '');
+      const url = `http://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json?key=${API_KEY}&targetDt=${targetDt}`;
 
-    return user_key
+      const tbody = document.getElementById('boxOfficeList');
+      const messageDiv = document.getElementById('message');
+      
+      tbody.innerHTML = '';
+      messageDiv.textContent = '';
 
+      try {
+        const response = await fetch(url);
+        const data = await response.json();
+        const dailyBoxOfficeList = data.boxOfficeResult?.dailyBoxOfficeList;
 
-# 3. KOBIS API 데이터 호출 함수
-@st.cache_data(ttl=3600)
-def fetch_box_office(api_key):
-    if not api_key:
-        return None, "NO_API_KEY"
+        // 영화 목록이 없거나 비어있는 경우
+        if (!dailyBoxOfficeList || dailyBoxOfficeList.length === 0) {
+          messageDiv.textContent = '그날은 아직 집계 전입니다.';
+          return;
+        }
 
-    target_dt = get_yesterday_kst()
-    url = "https://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
-    params = {"key": api_key, "targetDt": target_dt}
+        // 목록 출력
+        dailyBoxOfficeList.forEach(item => {
+          const rankInten = parseInt(item.rankInten, 10);
+          const audiAcc = parseInt(item.audiAcc, 10);
 
-    try:
-        response = requests.get(url, params=params, timeout=10)
+          // 1. 순위 변동 표시 로직
+          let rankChangeHtml = '<span class="rank-same">-</span>';
+          if (rankInten > 0) {
+            rankChangeHtml = `<span class="rank-up">▲ ${rankInten}</span>`;
+          } else if (rankInten < 0) {
+            rankChangeHtml = `<span class="rank-down">▼ ${Math.abs(rankInten)}</span>`;
+          }
 
-        if response.status_code != 200:
-            return None, f"HTTP 오류 발생 (상태 코드: {response.status_code})"
+          // 2. 누적관객 100만 이상 트로피 로직
+          let movieName = item.movieNm;
+          if (audiAcc >= 1000000) {
+            movieName += ' 🏆';
+          }
 
-        data = response.json()
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${item.rank}</td>
+            <td>${rankChangeHtml}</td>
+            <td class="movie-title">${movieName}</td>
+            <td>${item.openDt || '-'}</td>
+            <td>${Number(item.audiCnt).toLocaleString()}명</td>
+            <td>${audiAcc.toLocaleString()}명</td>
+          `;
+          tbody.appendChild(tr);
+        });
 
-        # [오류 대응 1] KOBIS API 오류 응답 (faultInfo)
-        if "faultInfo" in data:
-            message = data["faultInfo"].get("message", "인증키가 유효하지 않습니다.")
-            return None, f"API 오류 응답: {message}"
+      } catch (error) {
+        console.error('데이터를 불러오는 중 오류 발생:', error);
+        messageDiv.textContent = '데이터를 불러오는 중 오류가 발생했습니다.';
+      }
+    }
 
-        box_office_result = data.get("boxOfficeResult", {})
-        daily_list = box_office_result.get("dailyBoxOfficeList", [])
+    // 초기 화면 로딩 시 어제 박스오피스 조회
+    fetchBoxOffice(dateInput.value);
 
-        # [오류 대응 2] 데이터가 비어있는 경우
-        if not daily_list:
-            return None, "영화 목록 데이터가 비어 있습니다."
-
-        return daily_list, None
-
-    except requests.exceptions.RequestException as e:
-        return None, f"네트워크 요청 중 오류가 발생했습니다: {e}"
-
-
-# --- 메인 실행 로직 ---
-
-# 1. API 키 가져오기
-api_key = get_api_key()
-
-# 2. 데이터 불러오기
-movie_data, error_message = fetch_box_office(api_key)
-
-# 3. 화면 출력 및 처리
-if error_message:
-    if error_message == "NO_API_KEY":
-        st.info("💡 **KOBIS API 키를 설정해 주세요.**")
-        st.markdown(
-            """
-        ### 📌 해결 방법 (2가지 중 하나 선택)
-
-        **1. 화면 왼쪽 사이드바에서 키 입력하기 (가장 쉬운 방법)**
-        - 왼쪽 사이드바(‘🔑 KOBIS API 키 설정’) 입력창에 발급받은 API 키를 넣으시면 바로 작동합니다.
-
-        **2. Streamlit Cloud에 Secrets 등록하기**
-        - Streamlit Cloud 앱 관리 화면에서 **App Settings > Secrets** 메뉴에 이동합니다.
-        - 아래 내용을 입력하고 Save를 눌러주세요:
-          ```toml
-          KOBIS_KEY = "발급받은_인증키_입력"
-          ```
-        """
-        )
-    else:
-        st.error("⚠️ 데이터를 불러오지 못했습니다.")
-        st.warning(f"**원인:** {error_message}")
-
-        st.markdown("---")
-        st.subheader("🛠️ 확인 및 조치 사항")
-        st.write("1. 입력하신 **KOBIS API 인증키**가 올바른지 확인해 주세요.")
-        st.write("2. 영화진흥위원회 API 서버 상태를 확인해 주세요.")
-else:
-    # 4. 정상 작동 시 표 및 차트 출력
-    df = pd.DataFrame(movie_data)
-
-    df["rank"] = df["rank"].astype(int)
-    df["audiCnt"] = df["audiCnt"].astype(int)
-    df["audiAcc"] = df["audiAcc"].astype(int)
-    df["scrnCnt"] = df["scrnCnt"].astype(int)
-
-    top_movie = df.iloc[0]
-
-    # 1위 영화 지표 카드 (Metric) 3장
-    st.subheader(f"🥇 어제 박스오피스 1위: {top_movie['movieNm']}")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric(label="일일 관객수", value=f"{top_movie['audiCnt']:,} 명")
-    with col2:
-        st.metric(label="누적 관객수", value=f"{top_movie['audiAcc']:,} 명")
-    with col3:
-        st.metric(label="스크린 수", value=f"{top_movie['scrnCnt']:,} 개")
-
-    st.markdown("---")
-
-    # 관객수 상위 5편 막대그래프
-    st.subheader("📊 관객수 상위 5개 영화")
-    top5_df = df.head(5)[["movieNm", "audiCnt"]].copy()
-    top5_df = top5_df.rename(columns={"movieNm": "영화명", "audiCnt": "어제 관객수"})
-    top5_df = top5_df.set_index("영화명")
-    st.bar_chart(top5_df)
-
-    st.markdown("---")
-
-    # 전체 박스오피스 순위 표
-    st.subheader("📋 전체 박스오피스 순위")
-
-    display_df = df[
-        ["rank", "movieNm", "openDt", "audiCnt", "audiAcc", "scrnCnt"]
-    ].copy()
-    display_df.columns = ["순위", "영화명", "개봉일", "관객수", "누적관객", "스크린수"]
-
-    st.dataframe(
-        display_df.style.format(
-            {"관객수": "{:,}", "누적관객": "{:,}", "스크린수": "{:,}"}
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+    // 날짜 선택 변경 시 자동 재조회
+    dateInput.addEventListener('change', (e) => {
+      fetchBoxOffice(e.target.value);
+    });
+  </script>
+</body>
+</html>
